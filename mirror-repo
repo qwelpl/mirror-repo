@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GITLAB_API="https://gitlab.com/api/v4"
+GITHUB_API="https://api.github.com"
+
+# ── colors ───────────────────────────────────────────────────────────────────
+BOLD='\033[1m'
+DIM='\033[2m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+RESET='\033[0m'
+
+ok()   { echo -e "  ${GREEN}✓${RESET} $*"; }
+fail() { echo -e "  ${RED}✗${RESET} $*" >&2; exit 1; }
+info() { echo -e "  ${DIM}$*${RESET}"; }
+hdr()  { echo -e "\n${BOLD}${CYAN}$*${RESET}"; }
+
+# ── deps check ───────────────────────────────────────────────────────────────
+for cmd in curl jq; do
+  command -v "$cmd" &>/dev/null || fail "$cmd not found (brew install $cmd)"
+done
+
+# ── setup wizard ─────────────────────────────────────────────────────────────
+cmd_setup() {
+  local shell_rc=""
+  case "$SHELL" in
+    */zsh)  shell_rc="$HOME/.zshrc" ;;
+    */bash) shell_rc="$HOME/.bashrc" ;;
+    *)      shell_rc="$HOME/.profile" ;;
+  esac
+
+  echo -e "\n${BOLD}mirror-repo setup${RESET}"
+  echo -e "${DIM}Tokens are stored in $shell_rc${RESET}\n"
+
+  # ── GitLab token ─────────────────────────────────────────────────────────
+  hdr "GitLab Personal Access Token"
+  info "Generate at: gitlab.com/-/user_settings/personal_access_tokens"
+  info "Scopes needed: api"
+  echo -n "  Paste token: "
+  read -rs GITLAB_TOKEN_INPUT
+  echo ""
+
+  echo -n "  Validating..."
+  gl_response=$(curl -sf \
+    -H "Authorization: Bearer $GITLAB_TOKEN_INPUT" \
+    "$GITLAB_API/user" 2>/dev/null) || fail "Invalid GitLab token or network error"
+  gl_user=$(echo "$gl_response" | jq -r .username)
+  echo -e "\r  $(ok "GitLab: authenticated as ${BOLD}$gl_user${RESET}")"
+
+  # ── GitHub token ──────────────────────────────────────────────────────────
+  hdr "GitHub Personal Access Token"
+  info "Generate at: github.com/settings/tokens (classic)"
+  info "Scopes needed: repo"
+  echo -n "  Paste token: "
+  read -rs GITHUB_TOKEN_INPUT
+  echo ""
+
+  echo -n "  Validating..."
+  gh_response=$(curl -sf \
+    -H "Authorization: Bearer $GITHUB_TOKEN_INPUT" \
+    -H "Accept: application/vnd.github+json" \
+    "$GITHUB_API/user" 2>/dev/null) || fail "Invalid GitHub token or network error"
+  gh_user=$(echo "$gh_response" | jq -r .login)
+  echo -e "\r  $(ok "GitHub: authenticated as ${BOLD}$gh_user${RESET}")"
+
+  # ── write to shell rc ─────────────────────────────────────────────────────
+  hdr "Saving to $shell_rc"
+
+  # Remove old entries if present
+  local tmp
+  tmp=$(mktemp)
+  grep -v 'GITLAB_TOKEN\|GITHUB_TOKEN\|# mirror-repo' "$shell_rc" > "$tmp" 2>/dev/null || true
+  {
+    echo ""
+    echo "# mirror-repo"
+    echo "export GITLAB_TOKEN=\"$GITLAB_TOKEN_INPUT\""
+    echo "export GITHUB_TOKEN=\"$GITHUB_TOKEN_INPUT\""
+  } >> "$tmp"
+  mv "$tmp" "$shell_rc"
+
+  ok "Saved."
+  echo ""
+  echo -e "${DIM}Run: source $shell_rc${RESET}"
+  echo -e "${BOLD}Setup complete. Run: mirror-repo <repo-name>${RESET}\n"
+}
+
+# ── help ─────────────────────────────────────────────────────────────────────
+cmd_help() {
+  echo -e "\n${BOLD}mirror-repo${RESET} — create paired GitLab + GitHub repos with push mirroring\n"
+  echo -e "${BOLD}COMMANDS${RESET}"
+  echo -e "  mirror-repo setup                       interactive token setup"
+  echo -e "  mirror-repo help                        show this message"
+  echo -e "  mirror-repo <repo-name>                 create private repo pair"
+  echo -e "  mirror-repo --public <repo-name>        create public repo pair"
+  echo -e "  mirror-repo --desc \"...\" <repo-name>    set description\n"
+  echo -e "${BOLD}ENV VARS${RESET}"
+  echo -e "  GITLAB_TOKEN   GitLab PAT  (scope: api)"
+  echo -e "  GITHUB_TOKEN   GitHub PAT  (scope: repo)\n"
+  echo -e "${DIM}Run 'mirror-repo setup' to configure tokens interactively.${RESET}\n"
+}
+
+# ── main command routing ──────────────────────────────────────────────────────
+if [[ "${1:-}" == "setup" ]]; then
+  cmd_setup
+  exit 0
+fi
+
+if [[ "${1:-}" == "help" || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cmd_help
+  exit 0
+fi
+
+# ── env check (non-setup path) ────────────────────────────────────────────────
+if [[ -z "${GITLAB_TOKEN:-}" || -z "${GITHUB_TOKEN:-}" ]]; then
+  echo -e "${RED}Tokens not set.${RESET} Run: ${BOLD}mirror-repo setup${RESET}" >&2
+  exit 1
+fi
+
+# ── usage ─────────────────────────────────────────────────────────────────────
+usage() {
+  echo -e "Usage: mirror-repo setup"
+  echo -e "       mirror-repo [--public] [--desc \"...\"] <repo-name>" >&2
+  exit 1
+}
+
+# ── parse args ────────────────────────────────────────────────────────────────
+VISIBILITY="private"
+GH_PRIVATE="true"
+DESCRIPTION=""
+REPO_NAME=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --public) VISIBILITY="public"; GH_PRIVATE="false"; shift ;;
+    --desc)   DESCRIPTION="$2"; shift 2 ;;
+    -*)       usage ;;
+    *)        REPO_NAME="$1"; shift ;;
+  esac
+done
+
+[[ -z "$REPO_NAME" ]] && usage
+
+# ── resolve usernames ─────────────────────────────────────────────────────────
+hdr "Resolving identities"
+
+gl_user=$(curl -sf \
+  -H "Authorization: Bearer $GITLAB_TOKEN" \
+  "$GITLAB_API/user" | jq -r .username)
+ok "GitLab: $gl_user"
+
+gh_user=$(curl -sf \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  "$GITHUB_API/user" | jq -r .login)
+ok "GitHub: $gh_user"
+
+# ── create GitLab project ─────────────────────────────────────────────────────
+hdr "Creating GitLab repo"
+
+gl_payload=$(jq -n \
+  --arg name "$REPO_NAME" \
+  --arg desc "$DESCRIPTION" \
+  --arg vis "$VISIBILITY" \
+  '{name: $name, description: $desc, visibility: $vis, initialize_with_readme: true}')
+
+gl_project=$(curl -sf -X POST \
+  -H "Authorization: Bearer $GITLAB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$gl_payload" \
+  "$GITLAB_API/projects") || fail "GitLab repo creation failed (repo may already exist)"
+
+gl_id=$(echo "$gl_project"  | jq -r .id)
+gl_web=$(echo "$gl_project" | jq -r .web_url)
+ok "$gl_web"
+
+# ── create GitHub repo ────────────────────────────────────────────────────────
+hdr "Creating GitHub repo"
+
+gh_payload=$(jq -n \
+  --arg name "$REPO_NAME" \
+  --arg desc "$DESCRIPTION" \
+  --argjson priv "$GH_PRIVATE" \
+  '{name: $name, description: $desc, private: $priv, auto_init: false}')
+
+gh_repo=$(curl -sf -X POST \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Content-Type: application/json" \
+  -d "$gh_payload" \
+  "$GITHUB_API/user/repos") || fail "GitHub repo creation failed (repo may already exist)"
+
+gh_web=$(echo "$gh_repo" | jq -r .html_url)
+ok "$gh_web"
+
+# ── configure push mirror ─────────────────────────────────────────────────────
+hdr "Configuring push mirror"
+
+mirror_url="https://${gh_user}:${GITHUB_TOKEN}@github.com/${gh_user}/${REPO_NAME}.git"
+
+mirror_payload=$(jq -n \
+  --arg url "$mirror_url" \
+  '{url: $url, enabled: true, only_protected_branches: false}')
+
+curl -sf -X POST \
+  -H "Authorization: Bearer $GITLAB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$mirror_payload" \
+  "$GITLAB_API/projects/$gl_id/remote_mirrors" >/dev/null || fail "Mirror setup failed"
+
+ok "GitLab pushes will auto-sync to GitHub"
+
+# ── summary ───────────────────────────────────────────────────────────────────
+echo -e "\n${BOLD}Done.${RESET}"
+echo -e "  GitLab : $gl_web"
+echo -e "  GitHub : $gh_web\n"
