@@ -7,19 +7,52 @@ GITHUB_API="https://api.github.com"
 BOLD='\033[1m'
 DIM='\033[2m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 RESET='\033[0m'
+RULE='──────────────────────────────────────────────────'
 
-ok()   { echo -e "  ${GREEN}✓${RESET} $*"; }
-fail() { echo -e "  ${RED}✗${RESET} $*" >&2; exit 1; }
-info() { echo -e "  ${DIM}$*${RESET}"; }
-hdr()  { echo -e "\n${BOLD}${CYAN}$*${RESET}"; }
+ok()   { echo -e "  ${GREEN}✓${RESET}  $*"; }
+fail() { echo -e "\n  ${RED}✗${RESET}  $*\n" >&2; exit 1; }
+info() { echo -e "    ${DIM}$*${RESET}"; }
+hdr()  { echo -e "\n  ${BOLD}${CYAN}$*${RESET}\n  ${DIM}${RULE}${RESET}"; }
+step() { echo -e "\n  ${BOLD}${CYAN}[$1 of $2]${RESET}  ${BOLD}$3${RESET}"; }
 
+# ── Spinner ────────────────────────────────────────────────────────────────
+SPINNER_PID=""
+
+start_spinner() {
+  local msg="$1"
+  (
+    local i=0
+    local -a f=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    while true; do
+      printf "\r    \033[0;36m${f[$i]}\033[0m  %s" "$msg"
+      i=$(( (i+1) % 10 ))
+      sleep 0.08
+    done
+  ) &
+  SPINNER_PID=$!
+}
+
+stop_spinner() {
+  if [[ -n "${SPINNER_PID:-}" ]]; then
+    kill "$SPINNER_PID" 2>/dev/null || true
+    wait "$SPINNER_PID" 2>/dev/null || true
+    SPINNER_PID=""
+  fi
+  printf "\r\033[K"
+}
+
+trap 'stop_spinner' EXIT INT TERM
+
+# ── Dependency check ───────────────────────────────────────────────────────
 for cmd in curl jq; do
   command -v "$cmd" &>/dev/null || fail "$cmd not found (brew install $cmd)"
 done
 
+# ── Commands ───────────────────────────────────────────────────────────────
 cmd_setup() {
   local shell_rc=""
   case "$SHELL" in
@@ -28,39 +61,45 @@ cmd_setup() {
     *)      shell_rc="$HOME/.profile" ;;
   esac
 
-  echo -e "\n${BOLD}mirror-repo setup${RESET}"
-  echo -e "${DIM}Tokens are stored in $shell_rc${RESET}\n"
+  echo ""
+  echo -e "  ${BOLD}mirror-repo setup${RESET}"
+  echo -e "  ${DIM}${RULE}${RESET}"
+  echo -e "  ${DIM}Tokens will be saved to ${shell_rc}${RESET}"
 
   hdr "GitLab Personal Access Token"
-  info "Generate at: gitlab.com/-/user_settings/personal_access_tokens"
-  info "Scopes needed: api"
+  info "Generate: gitlab.com/-/user_settings/personal_access_tokens"
+  info "Scopes:   api"
+  echo ""
   echo -n "  Paste token: "
   read -rs GITLAB_TOKEN_INPUT
   echo ""
 
-  echo -n "  Validating..."
+  start_spinner "Validating GitLab token..."
   gl_response=$(curl -sf \
     -H "Authorization: Bearer $GITLAB_TOKEN_INPUT" \
-    "$GITLAB_API/user" 2>/dev/null) || fail "Invalid GitLab token or network error"
+    "$GITLAB_API/user" 2>/dev/null) || { stop_spinner; fail "Invalid GitLab token or network error"; }
   gl_user=$(echo "$gl_response" | jq -r .username)
-  echo -e "\r  $(ok "GitLab: authenticated as ${BOLD}$gl_user${RESET}")"
+  stop_spinner
+  ok "GitLab: authenticated as ${BOLD}$gl_user${RESET}"
 
   hdr "GitHub Personal Access Token"
-  info "Generate at: github.com/settings/tokens (classic)"
-  info "Scopes needed: repo"
+  info "Generate: github.com/settings/tokens (classic)"
+  info "Scopes:   repo"
+  echo ""
   echo -n "  Paste token: "
   read -rs GITHUB_TOKEN_INPUT
   echo ""
 
-  echo -n "  Validating..."
+  start_spinner "Validating GitHub token..."
   gh_response=$(curl -sf \
     -H "Authorization: Bearer $GITHUB_TOKEN_INPUT" \
     -H "Accept: application/vnd.github+json" \
-    "$GITHUB_API/user" 2>/dev/null) || fail "Invalid GitHub token or network error"
+    "$GITHUB_API/user" 2>/dev/null) || { stop_spinner; fail "Invalid GitHub token or network error"; }
   gh_user=$(echo "$gh_response" | jq -r .login)
-  echo -e "\r  $(ok "GitHub: authenticated as ${BOLD}$gh_user${RESET}")"
+  stop_spinner
+  ok "GitHub: authenticated as ${BOLD}$gh_user${RESET}"
 
-  hdr "Saving to $shell_rc"
+  hdr "Saving credentials"
 
   local tmp
   tmp=$(mktemp)
@@ -73,27 +112,40 @@ cmd_setup() {
   } >> "$tmp"
   mv "$tmp" "$shell_rc"
 
-  ok "Saved."
+  ok "Saved to ${shell_rc}"
   echo ""
-  echo -e "${DIM}Run: source $shell_rc${RESET}"
-  echo -e "${BOLD}Setup complete. Run: mirror-repo <repo-name>${RESET}\n"
+  echo -e "  ${DIM}Run: source ${shell_rc}${RESET}"
+  echo -e "  ${BOLD}Setup complete. Run: mirror-repo <repo-name>${RESET}"
+  echo ""
 }
 
 cmd_help() {
-  echo -e "\n${BOLD}mirror-repo${RESET} — create paired GitLab + GitHub repos with push mirroring\n"
-  echo -e "${BOLD}COMMANDS${RESET}"
-  echo -e "  mirror-repo setup                       interactive token setup"
-  echo -e "  mirror-repo help                        show this message"
-  echo -e "  mirror-repo <repo-name>                 create private repo pair"
-  echo -e "  mirror-repo --public <repo-name>        create public repo pair"
-  echo -e "  mirror-repo --keep-readme <repo-name>   skip boilerplate README deletion"
-  echo -e "  mirror-repo --desc \"...\" <repo-name>    set description\n"
-  echo -e "${BOLD}ENV VARS${RESET}"
-  echo -e "  GITLAB_TOKEN   GitLab PAT  (scope: api)"
-  echo -e "  GITHUB_TOKEN   GitHub PAT  (scope: repo)\n"
-  echo -e "${DIM}Run 'mirror-repo setup' to configure tokens interactively.${RESET}\n"
+  echo ""
+  echo -e "  ${BOLD}mirror-repo${RESET}  ${DIM}·  paired GitLab + GitHub repos with push mirroring${RESET}"
+  echo -e "  ${DIM}${RULE}${RESET}"
+  echo ""
+  echo -e "  ${BOLD}USAGE${RESET}"
+  echo -e "    mirror-repo setup"
+  echo -e "    mirror-repo [options] <repo-name>"
+  echo ""
+  echo -e "  ${BOLD}OPTIONS${RESET}"
+  echo -e "    ${CYAN}--public${RESET}           create public repos  (default: private)"
+  echo -e "    ${CYAN}--keep-readme${RESET}      skip boilerplate README deletion"
+  echo -e "    ${CYAN}--desc \"...\"${RESET}       set description on both repos"
+  echo ""
+  echo -e "  ${BOLD}COMMANDS${RESET}"
+  echo -e "    ${CYAN}setup${RESET}              interactive token configuration"
+  echo -e "    ${CYAN}help${RESET}               show this message"
+  echo ""
+  echo -e "  ${BOLD}ENV VARS${RESET}"
+  echo -e "    ${CYAN}GITLAB_TOKEN${RESET}       GitLab PAT  (scope: api)"
+  echo -e "    ${CYAN}GITHUB_TOKEN${RESET}       GitHub PAT  (scope: repo)"
+  echo ""
+  echo -e "  ${DIM}Run 'mirror-repo setup' to configure tokens interactively.${RESET}"
+  echo ""
 }
 
+# ── Dispatch ───────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "setup" ]]; then
   cmd_setup
   exit 0
@@ -105,16 +157,17 @@ if [[ "${1:-}" == "help" || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 if [[ -z "${GITLAB_TOKEN:-}" || -z "${GITHUB_TOKEN:-}" ]]; then
-  echo -e "${RED}Tokens not set.${RESET} Run: ${BOLD}mirror-repo setup${RESET}" >&2
+  echo -e "\n  ${RED}Tokens not set.${RESET} Run: ${BOLD}mirror-repo setup${RESET}\n" >&2
   exit 1
 fi
 
 usage() {
-  echo -e "Usage: mirror-repo setup"
-  echo -e "       mirror-repo [--public] [--keep-readme] [--desc \"...\"] <repo-name>" >&2
+  echo -e "  Usage: mirror-repo setup"
+  echo -e "         mirror-repo [--public] [--keep-readme] [--desc \"...\"] <repo-name>" >&2
   exit 1
 }
 
+# ── Argument parsing ───────────────────────────────────────────────────────
 VISIBILITY="private"
 GH_PRIVATE="true"
 DESCRIPTION=""
@@ -133,20 +186,31 @@ done
 
 [[ -z "$REPO_NAME" ]] && usage
 
-hdr "Resolving identities"
+# ── Banner ─────────────────────────────────────────────────────────────────
+echo ""
+echo -e "  ${BOLD}mirror-repo${RESET}  ${DIM}·  ${REPO_NAME}${RESET}"
+echo -e "  ${DIM}${RULE}${RESET}"
 
+# ── Step 1: Resolve identities ─────────────────────────────────────────────
+step 1 4 "Resolving identities"
+
+start_spinner "Fetching GitLab identity..."
 gl_user=$(curl -sf \
   -H "Authorization: Bearer $GITLAB_TOKEN" \
   "$GITLAB_API/user" | jq -r .username)
-ok "GitLab: $gl_user"
+stop_spinner
+ok "GitLab: ${BOLD}$gl_user${RESET}"
 
+start_spinner "Fetching GitHub identity..."
 gh_user=$(curl -sf \
   -H "Authorization: Bearer $GITHUB_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   "$GITHUB_API/user" | jq -r .login)
-ok "GitHub: $gh_user"
+stop_spinner
+ok "GitHub: ${BOLD}$gh_user${RESET}"
 
-hdr "Creating GitLab repo"
+# ── Step 2: Create GitLab repo ─────────────────────────────────────────────
+step 2 4 "Creating GitLab repo"
 
 gl_payload=$(jq -n \
   --arg name "$REPO_NAME" \
@@ -154,26 +218,32 @@ gl_payload=$(jq -n \
   --arg vis "$VISIBILITY" \
   '{name: $name, description: $desc, visibility: $vis, initialize_with_readme: true}')
 
+start_spinner "Creating repo..."
 gl_project=$(curl -sf -X POST \
   -H "Authorization: Bearer $GITLAB_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$gl_payload" \
-  "$GITLAB_API/projects") || fail "GitLab repo creation failed (repo may already exist)"
+  "$GITLAB_API/projects") || { stop_spinner; fail "GitLab repo creation failed (repo may already exist)"; }
+stop_spinner
 
 gl_id=$(echo "$gl_project"  | jq -r .id)
 gl_web=$(echo "$gl_project" | jq -r .web_url)
 ok "$gl_web"
 
 if [[ "$KEEP_README" == "false" ]]; then
+  start_spinner "Removing boilerplate README..."
   curl -sf -X DELETE \
     -H "Authorization: Bearer $GITLAB_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"branch":"main","commit_message":"chore: remove boilerplate README"}' \
-    "$GITLAB_API/projects/$gl_id/repository/files/README.md" >/dev/null
+    "$GITLAB_API/projects/$gl_id/repository/files/README.md" >/dev/null \
+    || { stop_spinner; fail "README removal failed"; }
+  stop_spinner
   ok "Boilerplate README removed"
 fi
 
-hdr "Creating GitHub repo"
+# ── Step 3: Create GitHub repo ─────────────────────────────────────────────
+step 3 4 "Creating GitHub repo"
 
 gh_payload=$(jq -n \
   --arg name "$REPO_NAME" \
@@ -181,17 +251,20 @@ gh_payload=$(jq -n \
   --argjson priv "$GH_PRIVATE" \
   '{name: $name, description: $desc, private: $priv, auto_init: false}')
 
+start_spinner "Creating repo..."
 gh_repo=$(curl -sf -X POST \
   -H "Authorization: Bearer $GITHUB_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   -H "Content-Type: application/json" \
   -d "$gh_payload" \
-  "$GITHUB_API/user/repos") || fail "GitHub repo creation failed (repo may already exist)"
+  "$GITHUB_API/user/repos") || { stop_spinner; fail "GitHub repo creation failed (repo may already exist)"; }
+stop_spinner
 
 gh_web=$(echo "$gh_repo" | jq -r .html_url)
 ok "$gh_web"
 
-hdr "Configuring push mirror"
+# ── Step 4: Configure mirror ───────────────────────────────────────────────
+step 4 4 "Configuring push mirror"
 
 mirror_url="https://${gh_user}:${GITHUB_TOKEN}@github.com/${gh_user}/${REPO_NAME}.git"
 
@@ -199,14 +272,22 @@ mirror_payload=$(jq -n \
   --arg url "$mirror_url" \
   '{url: $url, enabled: true, only_protected_branches: false}')
 
+start_spinner "Setting up mirror..."
 curl -sf -X POST \
   -H "Authorization: Bearer $GITLAB_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$mirror_payload" \
-  "$GITLAB_API/projects/$gl_id/remote_mirrors" >/dev/null || fail "Mirror setup failed"
+  "$GITLAB_API/projects/$gl_id/remote_mirrors" >/dev/null \
+  || { stop_spinner; fail "Mirror setup failed"; }
+stop_spinner
+ok "GitLab will auto-sync to GitHub"
 
-ok "GitLab pushes will auto-sync to GitHub"
-
-echo -e "\n${BOLD}Done.${RESET}"
-echo -e "  GitLab : $gl_web"
-echo -e "  GitHub : $gh_web\n"
+# ── Summary ────────────────────────────────────────────────────────────────
+echo ""
+echo -e "  ${DIM}${RULE}${RESET}"
+echo -e "  ${BOLD}${GREEN}✓${RESET}  ${BOLD}Done${RESET}"
+echo ""
+echo -e "  ${DIM}GitLab${RESET}   $gl_web"
+echo -e "  ${DIM}GitHub${RESET}   $gh_web"
+echo -e "  ${DIM}${RULE}${RESET}"
+echo ""
