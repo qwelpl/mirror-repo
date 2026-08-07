@@ -12,6 +12,11 @@ RED='\033[0;31m'
 CYAN='\033[0;36m'
 RESET='\033[0m'
 RULE='──────────────────────────────────────────────────'
+CONFIG_FILE="$HOME/.config/mirror-repo/config"
+
+# Auto-load tokens from config file
+# shellcheck source=/dev/null
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
 ok()   { echo -e "  ${GREEN}✓${RESET}  $*"; }
 fail() { echo -e "\n  ${RED}✗${RESET}  $*\n" >&2; exit 1; }
@@ -54,17 +59,10 @@ done
 
 # ── Commands ───────────────────────────────────────────────────────────────
 cmd_setup() {
-  local shell_rc=""
-  case "$SHELL" in
-    */zsh)  shell_rc="$HOME/.zshrc" ;;
-    */bash) shell_rc="$HOME/.bashrc" ;;
-    *)      shell_rc="$HOME/.profile" ;;
-  esac
-
   echo ""
   echo -e "  ${BOLD}mirror-repo setup${RESET}"
   echo -e "  ${DIM}${RULE}${RESET}"
-  echo -e "  ${DIM}Tokens will be saved to ${shell_rc}${RESET}"
+  echo -e "  ${DIM}Tokens will be saved to ${CONFIG_FILE}${RESET}"
 
   hdr "GitLab Personal Access Token"
   info "Generate: gitlab.com/-/user_settings/personal_access_tokens"
@@ -101,20 +99,15 @@ cmd_setup() {
 
   hdr "Saving credentials"
 
-  local tmp
-  tmp=$(mktemp)
-  grep -v 'GITLAB_TOKEN\|GITHUB_TOKEN\|# mirror-repo' "$shell_rc" > "$tmp" 2>/dev/null || true
+  mkdir -p "$(dirname "$CONFIG_FILE")"
   {
-    echo ""
-    echo "# mirror-repo"
     echo "export GITLAB_TOKEN=\"$GITLAB_TOKEN_INPUT\""
     echo "export GITHUB_TOKEN=\"$GITHUB_TOKEN_INPUT\""
-  } >> "$tmp"
-  mv "$tmp" "$shell_rc"
+  } > "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
 
-  ok "Saved to ${shell_rc}"
+  ok "Saved to ${CONFIG_FILE}"
   echo ""
-  echo -e "  ${DIM}Run: source ${shell_rc}${RESET}"
   echo -e "  ${BOLD}Setup complete. Run: mirror-repo <repo-name>${RESET}"
   echo ""
 }
